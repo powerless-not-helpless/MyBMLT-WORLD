@@ -41,26 +41,295 @@ nonisolated struct ServiceBody: Identifiable, Codable, Hashable {
         return URL(string: raw)
     }
 
-    /// Helplines appear as bare digit strings ("6195841007") and formatted
-    /// strings ("(512) 480-0004"). Normalize to digits for tel: URLs.
-    var helplineDigits: String? {
-        guard let raw = helpline else { return nil }
-        let digits = raw.filter(\.isNumber)
-        // Reject placeholder junk like "0000000000".
-        guard digits.count >= 7, Set(digits).count > 1 else { return nil }
-        return digits
+    /// Helplines arrive in whatever shape the service body typed them:
+    /// bare digits ("6195841007"), parens ("(512) 480-0004"), E.164
+    /// ("+61488811247"), an international prefix ("00353871386120"), two or
+    /// three numbers in one field, or vanity text ("1-800-600-HOPE").
+    ///
+    /// This splits the field into individual, dialable numbers. It does not
+    /// guess: a number keeps whatever country information the server gave it,
+    /// and one that carries none is reported as domestic rather than dressed up
+    /// with a country code it does not have.
+    var helplines: [Helpline] {
+        guard let raw = helpline else { return [] }
+        return Helpline.parse(raw)
     }
 
-    var helplineDisplay: String? {
-        guard let d = helplineDigits else { return nil }
-        if d.count == 10 {
-            let a = d.prefix(3), b = d.dropFirst(3).prefix(3), c = d.suffix(4)
-            return "(\(a)) \(b)-\(c)"
+    /// The first usable number, for callers that show only one.
+    var primaryHelpline: Helpline? { helplines.first }
+
+    /// Digits-only form of the primary number, for `tel:` URLs.
+    var helplineDigits: String? { primaryHelpline?.dialString }
+
+    /// Human-readable form of the primary number.
+    var helplineDisplay: String? { primaryHelpline?.display }
+}
+
+/// One dialable phone number extracted from a service body's `helpline` field.
+///
+/// The old implementation reduced the field to digits and then formatted any
+/// 10-digit result as `(XXX) XXX-XXXX`. That silently corrupted data outside the
+/// NANP: the Australian local-rate number `1300 652 820` was rendered
+/// `(130) 065-2820`, a well-formed US number that reaches a stranger. Stripping
+/// `+` from E.164 (`+61488811247`) made real numbers undialable abroad, and
+/// three numbers in one field were concatenated into one 30-digit string.
+///
+/// The rule now: **never claim more reachability than the server supplied.**
+nonisolated struct Helpline: Equatable, Hashable {
+
+    /// How widely the number can be reached, derived only from what the field
+    /// actually contained.
+    enum Reachability: Equatable, Hashable {
+        /// Carries a country code, so it dials from anywhere.
+        case international(countryCode: String)
+        /// A NANP number with no `+`. Dialable from US/CA and most of the NANP.
+        case nanp
+        /// A shortcode (`988`) or local-rate line (`1300 ...`) with no country
+        /// code and no international form. Reachable only from its home country,
+        /// whose identity this type cannot know.
+        case domesticOnly
+
+        /// Short line shown beside a number that is not internationally dialable.
+        var notice: String? {
+            switch self {
+            case .international: nil
+            case .nanp: nil
+            case .domesticOnly: "local number, may not work from abroad"
+            }
         }
-        if d.count == 11 && d.hasPrefix("1") {
-            return "+\(d)"
+    }
+
+    /// The original text this number was parsed from, trimmed.
+    let raw: String
+    /// Digits with a leading `+` when the number has a country code.
+    let dialString: String
+    /// What the user sees.
+    let display: String
+    let reachability: Reachability
+
+    /// Parse a `helpline` field into zero or more numbers.
+    ///
+    /// Splits on the separators real data uses to hold multiple numbers —
+    /// commas, slashes, pipes and semicolons — then classifies each piece
+    /// independently. A piece with no digits (a bare "or") drops out.
+    static func parse(_ raw: String) -> [Helpline] {
+        raw
+            .components(separatedBy: Self.separators)
+            // A single piece can still hold two numbers joined by a word rather
+            // than punctuation — verified: "352-553-2396 or 877-782-7657",
+            // "(800)-733-8855 OREGON or (530) 842-7502 CA" and
+            // "1-855-LIGNENA 1-855-544-6362". Splitting on separators alone
+            // concatenated those into one unmatchable string.
+            .flatMap(Self.splitNumberRuns)
+            .compactMap { Self.parseOne($0) }
+    }
+
+    private static let separators = CharacterSet(charactersIn: ",;/|\n\r\t")
+
+    /// Split a piece on runs of number-shaped characters.
+    ///
+    /// A run is a `+` followed by digits, or a bare group of digits. Ordinary
+    /// words and `or` separate runs, so two numbers joined by text become two
+    /// runs. Single numbers with internal punctuation (`(512) 480-0004`,
+    /// `+91 90865 97717`) stay one run, because the gap between their digit
+    /// groups is only punctuation or whitespace.
+    ///
+    /// Letters are dropped, so a vanity tail contributes only its leading
+    /// digits (`1-800-600-HOPE` -> `1800600`). That fragment is then judged by
+    /// length like any other number, rather than guessed at.
+    ///
+    /// A letter after digits closes the run: `OREGON` following
+    /// `(800)-733-8855 ` must not merge into the next number.
+    private static func splitNumberRuns(_ piece: String) -> [String] {
+        var runs: [String] = []
+        var current = ""
+        var sawLetterSinceDigits = false
+
+        for ch in piece {
+            if ch.isNumber {
+                current.append(ch)
+                sawLetterSinceDigits = false
+            } else if ch == "+" && current.isEmpty {
+                current.append(ch)
+            } else if ch.isLetter {
+                // Only meaningful once digits are buffered; a leading word like
+                // "Bilingual" is ignored entirely.
+                if !current.isEmpty { sawLetterSinceDigits = true }
+            } else {
+                // Punctuation and whitespace do not break a run by themselves,
+                // but they do close a run that letters have already ended.
+                if sawLetterSinceDigits, !current.isEmpty {
+                    runs.append(current)
+                    current = ""
+                    sawLetterSinceDigits = false
+                }
+            }
         }
-        return d
+        if !current.isEmpty { runs.append(current) }
+        return runs
+    }
+
+    /// Classify a single number, or return nil when it is junk.
+    private static func parseOne(_ piece: String) -> Helpline? {
+        let trimmed = piece.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        // A field that is purely a vanity word ("HOPE") has no number in it.
+        // `1-800-600-HOPE` does: keep the digits, drop the letters, and let the
+        // resulting length decide reachability. There is no way to recover the
+        // letters-to-digits mapping reliably (`HOPE` is 4673 on one exchange and
+        // 600-4673 versus 800-467-3000 are both plausible), so the number is
+        // reported as-is rather than guessed at.
+        let hasInternationalPlus = trimmed.hasPrefix("+")
+        // Keep a leading '+' as the one non-digit that carries meaning: it is
+        // what makes a number dialable across borders. Everything else that is
+        // not a digit is punctuation and is dropped.
+        var digits = trimmed.filter(\.isNumber)
+        if hasInternationalPlus { digits = "+" + digits }
+
+        // `00` is the international access prefix in most of the world outside
+        // the NANP. Ireland's `00353871386120` is `+353 87 138 6120`. This
+        // translation is unambiguous — no NANP number begins `00`.
+        if !hasInternationalPlus, digits.hasPrefix("00"), digits.count >= 9 {
+            digits = "+" + digits.dropFirst(2)
+        }
+
+        // Placeholder junk: "0000000000", "1111111111", a lone "0".
+        let bareDigits = digits.filter(\.isNumber)
+        guard bareDigits.count >= 3, Set(bareDigits).count > 1 else { return nil }
+
+        if digits.hasPrefix("+") {
+            let body = digits.dropFirst()
+            // `+` followed by 7+ digits is E.164. Shorter than that with a `+`
+            // is not a real country-coded number; treat it as domestic rather
+            // than inventing a country code.
+            if body.count >= 7 {
+                let cc = String(body.prefix(Self.countryCodeLength(body)))
+                return Helpline(
+                    raw: trimmed,
+                    dialString: "+" + body,
+                    display: Self.internationalDisplay("+" + body),
+                    reachability: .international(countryCode: cc)
+                )
+            }
+        }
+
+        // Shortcodes: `988`, `911`, `1300`-style local-rate lines are short or
+        // begin with a domestic prefix. These are never internationally
+        // dialable, and US formatting must not touch them.
+        //
+        // A 4-digit run is almost always a vanity-code stub (the `1855` left
+        // over from `1-855-LIGNENA`), not a real shortcode. Drop it rather than
+        // offering the user a number that cannot connect.
+        if bareDigits.count == 4 { return nil }
+        if bareDigits.count < 7 || Self.isLocalRatePrefix(bareDigits) {
+            return Helpline(
+                raw: trimmed,
+                dialString: bareDigits,
+                display: bareDigits,
+                reachability: .domesticOnly
+            )
+        }
+
+        // NANP: exactly 10 digits, or 11 beginning with 1.
+        if bareDigits.count == 10 {
+            return Helpline(
+                raw: trimmed,
+                dialString: bareDigits,
+                display: Self.nanpDisplay(bareDigits),
+                reachability: .nanp
+            )
+        }
+        if bareDigits.count == 11, bareDigits.hasPrefix("1") {
+            return Helpline(
+                raw: trimmed,
+                dialString: "+" + bareDigits,
+                display: "+" + bareDigits,
+                reachability: .international(countryCode: "1")
+            )
+        }
+
+        // Anything else: a real number of unknown origin. Show the digits
+        // unformatted. Ugly, but honest — an unformatted Australian number is
+        // dialable from Australia, whereas a fabricated US one is not dialable
+        // from anywhere the user expects.
+        return Helpline(
+            raw: trimmed,
+            dialString: bareDigits,
+            display: bareDigits,
+            reachability: .domesticOnly
+        )
+    }
+
+    /// E.164 country codes are 1–3 digits. This picks the length from the
+    /// leading digits using the real allocation ranges rather than assuming 2,
+    /// which would read `+61488811247` as country `61` (correct) but
+    /// `+353871386120` as `35` (wrong — it is `353`).
+    private static func countryCodeLength(_ body: Substring) -> Int {
+        guard let first = body.first else { return 1 }
+        switch first {
+        case "1", "7": return 1
+        case "2", "3", "4", "5", "6", "8", "9":
+            // 2-digit codes dominate here, but 3-digit codes exist throughout
+            // these ranges (e.g. 353 Ireland, 595 Paraguay, 998 Uzbekistan).
+            // Prefer 3 when the leading three digits name a known code.
+            let three = String(body.prefix(3))
+            return threeCountryCodes.contains(three) ? 3 : 2
+        default: return 1
+        }
+    }
+
+    /// Three-digit E.164 codes present in the aggregator data (verified against
+    /// the bodies that supply them). Not exhaustive worldwide — only enough to
+    /// avoid mis-splitting the numbers this app actually receives. A code absent
+    /// here falls back to 2 digits, which is the common case.
+    private static let threeCountryCodes: Set<String> = [
+        "353", // Ireland
+        "595", // Paraguay
+        "998", // Uzbekistan
+        "994", // Azerbaijan
+        "995", // Georgia
+        "996", // Kyrgyzstan
+        "992", // Tajikistan
+        "993", // Turkmenistan
+        "591", // Bolivia
+        "593", // Ecuador
+        "597", // Suriname
+        "598", // Uruguay
+    ]
+
+    /// Local-rate / domestic-only prefixes that must never be US-formatted.
+    ///
+    /// `1300 652 820` (Australia) is 10 digits and starts with `1300`. But a US
+    /// toll-free `1-800-555-0199` is 11 digits and must not be caught here —
+    /// otherwise a real NANP number is mislabelled domestic-only. Only the
+    /// 10-digit `1300`/`1800` forms are the Australian local-rate pattern.
+    private static func isLocalRatePrefix(_ digits: String) -> Bool {
+        digits.count == 10 && (digits.hasPrefix("1300") || digits.hasPrefix("1800"))
+    }
+
+    /// Group E.164 digits for reading: `+61488811247` -> `+61 488 811 247`.
+    private static func internationalDisplay(_ e164: String) -> String {
+        let body = e164.dropFirst()
+        let ccLength = countryCodeLength(body)
+        let cc = body.prefix(ccLength)
+        var rest = Array(body.dropFirst(ccLength))
+        var groups: [String] = []
+        // Chunk the remainder in 3s; the last group keeps whatever is left so
+        // nothing is dropped.
+        while rest.count > 3 {
+            groups.append(String(rest.prefix(3)))
+            rest.removeFirst(3)
+        }
+        if !rest.isEmpty { groups.append(String(rest)) }
+        let grouped = ([String(cc)] + groups).joined(separator: " ")
+        return grouped.isEmpty ? e164 : "+" + grouped
+    }
+
+    /// `(619) 584-1007`.
+    private static func nanpDisplay(_ d: String) -> String {
+        guard d.count == 10 else { return d }
+        return "(\(d.prefix(3))) \(d.dropFirst(3).prefix(3))-\(d.suffix(4))"
     }
 }
 
@@ -108,12 +377,12 @@ nonisolated struct ServiceBodyTree {
     /// Required because verified SD data has the helpline on the **region**
     /// (2313 -> "6195841007") while every sub-area returns `""`. Reading only
     /// the selected area would show nothing.
-    func nearestHelpline(for body: ServiceBody) -> (body: ServiceBody, display: String, digits: String)? {
+    func nearestHelpline(for body: ServiceBody) -> (body: ServiceBody, helpline: Helpline)? {
         var current: ServiceBody? = body
         var hops = 0
         while let node = current, hops < 8 {
-            if let display = node.helplineDisplay, let digits = node.helplineDigits {
-                return (node, display, digits)
+            if let helpline = node.primaryHelpline {
+                return (node, helpline)
             }
             guard let parentID = node.parentID else { break }
             current = bodies.first { $0.id == parentID && $0.rootServerID == node.rootServerID }

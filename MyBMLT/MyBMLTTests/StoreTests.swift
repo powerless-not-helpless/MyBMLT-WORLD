@@ -788,8 +788,8 @@ struct ServiceBodyTreeTests {
         let tree = ServiceBodyTree([region, area, subArea])
         let found = try #require(tree.nearestHelpline(for: area))
 
-        #expect(found.digits == "6195841007")
-        #expect(found.display == "(619) 584-1007")
+        #expect(found.helpline.dialString == "6195841007")
+        #expect(found.helpline.display == "(619) 584-1007")
         // Must attribute the number to the region, not the area that lacks one.
         #expect(found.body.id == 2313)
     }
@@ -929,5 +929,174 @@ struct ServiceBodyTreeTests {
 
         // Both contain "san"; only one contains "san diego".
         #expect(tree.search("san diego").first?.name == "San Diego Imperial Counties Region")
+    }
+}
+
+/// Helpline parsing, pinned against the exact strings the live aggregator
+/// returns. Every case here is a real service body field, not a hypothetical.
+///
+/// The regression this suite exists to prevent: `1300 652 820` (an Australian
+/// local-rate number) used to render `(130) 065-2820`, a well-formed US number
+/// that dials a stranger.
+@Suite("Helpline parsing")
+struct HelplineTests {
+
+    private func parse(_ s: String) -> [Helpline] { Helpline.parse(s) }
+
+    @Test("US 10-digit is NANP-formatted")
+    func nanpTen() throws {
+        let h = try #require(parse("6195841007").first)
+        #expect(h.display == "(619) 584-1007")
+        #expect(h.dialString == "6195841007")
+        #expect(h.reachability == .nanp)
+    }
+
+    @Test("Parens and dashes are normalized away")
+    func nanpFormatted() throws {
+        let h = try #require(parse("(512) 480-0004").first)
+        #expect(h.display == "(512) 480-0004")
+        #expect(h.dialString == "5124800004")
+    }
+
+    @Test("Existing + is preserved and dialable")
+    func e164Preserved() throws {
+        // Australian Region id 490, verbatim from the server.
+        let h = try #require(parse("+61488811247").first)
+        #expect(h.dialString == "+61488811247")
+        #expect(h.reachability == .international(countryCode: "61"))
+        // The old code stripped the '+' and made this undialable abroad.
+        #expect(h.dialString.hasPrefix("+"))
+    }
+
+    @Test("Three-digit country code 353 is split correctly")
+    func threeDigitCountryCode() throws {
+        // Ireland: +353, not +35.
+        let h = try #require(parse("+353871386120").first)
+        #expect(h.reachability == .international(countryCode: "353"))
+    }
+
+    @Test("Australian local-rate is NOT rendered as a US number")
+    func australianLocalRateNotLiesAsUS() throws {
+        // South / Western Australia ids 504, 507. This is the headline
+        // regression: it previously displayed "(130) 065-2820".
+        let h = try #require(parse("1300 652 820").first)
+        #expect(h.display != "(130) 065-2820")
+        #expect(h.display == "1300652820")
+        #expect(h.reachability == .domesticOnly)
+        #expect(h.reachability.notice != nil)
+    }
+
+    @Test("00 international prefix becomes +")
+    func doubleZeroBecomesPlus() throws {
+        // Southern Area of Ireland id 2418.
+        let h = try #require(parse("00353871386120").first)
+        #expect(h.dialString == "+353871386120")
+        #expect(h.reachability == .international(countryCode: "353"))
+    }
+
+    @Test("988 is a shortcode, not a NANP number")
+    func shortcodeIsDomestic() throws {
+        let h = try #require(parse("988").first)
+        #expect(h.reachability == .domesticOnly)
+        #expect(h.display == "988")
+        #expect(h.dialString == "988")
+    }
+
+    @Test("Multiple numbers in one field are split, not concatenated")
+    func splitMultipleNumbers() throws {
+        // Northeast Washington Area, verbatim: three numbers in one field.
+        // Previously concatenated into one 30-digit unmatchable string.
+        let got = parse("509-325-5045, 208-746-7632, 208-883-5006")
+        #expect(got.count == 3)
+        #expect(got.map(\.dialString) == ["5093255045", "2087467632", "2088835006"])
+    }
+
+    @Test("Two numbers joined by the word 'or' are split")
+    func splitOnWordOr() throws {
+        // Verified live: "352-553-2396 or 877-782-7657". The word 'or' is not a
+        // punctuation separator, so separator-splitting alone concatenated these
+        // into one unmatchable 20-digit string.
+        let got = parse("352-553-2396 or 877-782-7657")
+        #expect(got.map(\.dialString) == ["3525532396", "8777827657"])
+    }
+
+    @Test("A number followed by a place name keeps only the number")
+    func splitOnTrailingPlaceName() throws {
+        // Verified live: "(800)-733-8855 OREGON or (530) 842-7502 CALIFORNIA".
+        let got = parse("(800)-733-8855 OREGON or (530) 842-7502 CALIFORNIA")
+        #expect(got.map(\.dialString) == ["8007338855", "5308427502"])
+    }
+
+    @Test("A vanity stub run is dropped, the real number kept")
+    func vanityStubDropped() throws {
+        // Verified live: "1-855-LIGNENA 1-855-544-6362". The first half is a
+        // vanity stub whose letters cannot be mapped back reliably; it yields
+        // the 4-digit fragment 1855. Only the dialable number survives.
+        let got = parse("1-855-LIGNENA 1-855-544-6362")
+        #expect(!got.contains { $0.dialString == "1855" })
+        #expect(got.contains { $0.dialString == "+18555446362" })
+    }
+
+    @Test("A slash with surrounding words still splits")
+    func slashWithWords() throws {
+        // Verified live: "(888) 322-6817 / Bilingual (818) 427-4212".
+        let got = parse("(888) 322-6817  /  Bilingual (818) 427-4212")
+        #expect(got.map(\.dialString) == ["8883226817", "8184274212"])
+    }
+
+    @Test("Vanity numbers keep their digits rather than being mangled")
+    func vanityNumber() throws {
+        // "1-844-530-HOPE" -> digits only. Not guessed at: the letters-to-digits
+        // mapping is ambiguous, so the raw digits are reported.
+        let h = try #require(parse("1-844-530-HOPE").first)
+        #expect(h.dialString == "1844530")
+        #expect(h.reachability == .domesticOnly)
+    }
+
+    @Test("A vanity code that yields only a fragment is dropped")
+    func vanityFragmentDropped() {
+        // "1-800-GET-HOPE" leaves the 4-digit stub 1800, which is not a number
+        // anyone can dial. Better to show nothing than a dead line.
+        #expect(parse("1-800-GET-HOPE").isEmpty)
+    }
+
+    @Test("Trailing junk does not corrupt the number")
+    func trailingJunk() throws {
+        // Martha's Vineyard Area: "866-686-2669|wwww1".
+        let got = parse("866-686-2669|wwww1")
+        #expect(got.first?.dialString == "8666862669")
+    }
+
+    @Test("Placeholder zeros are rejected")
+    func rejectsZeros() {
+        #expect(parse("0000000000").isEmpty)
+        #expect(parse("1111111111").isEmpty)
+    }
+
+    @Test("Empty and non-numeric fields yield nothing")
+    func rejectsJunk() {
+        #expect(parse("").isEmpty)
+        #expect(parse("   ").isEmpty)
+        #expect(parse("n/a").isEmpty)
+    }
+
+    @Test("1+10 digits is treated as NANP with an explicit +1")
+    func elevenDigitNANP() throws {
+        let h = try #require(parse("1-800-555-0199").first)
+        #expect(h.dialString == "+18005550199")
+        #expect(h.reachability == .international(countryCode: "1"))
+    }
+
+    @Test("ServiceBody exposes only reachable numbers")
+    func bodyIntegration() {
+        let none = ServiceBody(id: 1, parentID: nil, name: "N", description: nil, type: "AS",
+                               url: nil, helpline: "0000000000", worldID: nil, rootServerID: 1)
+        #expect(none.primaryHelpline == nil)
+        #expect(none.helplineDisplay == nil)
+
+        let au = ServiceBody(id: 490, parentID: nil, name: "Australian Region", description: nil,
+                             type: "RS", url: nil, helpline: "+61488811247",
+                             worldID: nil, rootServerID: 1)
+        #expect(au.helplineDigits == "+61488811247")
     }
 }

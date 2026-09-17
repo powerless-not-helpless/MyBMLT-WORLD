@@ -32,10 +32,8 @@ struct SupportView: View {
             if let active = areas.active, let activeBody = areas.activeBody,
                let tree = areas.tree {
 
-                if let helpline = tree.nearestHelpline(for: activeBody) {
-                    helplineRow(display: helpline.display,
-                                digits: helpline.digits,
-                                source: helpline.body.name)
+                if let found = tree.nearestHelpline(for: activeBody) {
+                    helplineRow(found.helpline, source: found.body.name)
                 } else {
                     // Verified to be the *common* case: most sub-areas have an
                     // empty helpline. Say so plainly instead of showing nothing.
@@ -61,10 +59,19 @@ struct SupportView: View {
         }
     }
 
-    private func helplineRow(display: String, digits: String, source: String) -> some View {
-        Link(destination: URL(string: "tel://\(digits)")!) {
+    private func helplineRow(_ helpline: Helpline, source: String) -> some View {
+        Link(destination: URL(string: "tel://\(helpline.dialString)")!) {
             HStack {
-                Label(display, systemImage: "phone.fill")
+                VStack(alignment: .leading, spacing: 2) {
+                    Label(helpline.display, systemImage: "phone.fill")
+                    // A number with no country code cannot be dialled from
+                    // abroad. Say so rather than letting the user find out.
+                    if let notice = helpline.reachability.notice {
+                        Text(notice)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Spacer()
                 Text(source)
                     .font(.caption2)
