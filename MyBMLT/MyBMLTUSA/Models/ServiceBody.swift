@@ -134,38 +134,66 @@ nonisolated struct Helpline: Equatable, Hashable {
     /// `+91 90865 97717`) stay one run, because the gap between their digit
     /// groups is only punctuation or whitespace.
     ///
-    /// Letters are dropped, so a vanity tail contributes only its leading
-    /// digits (`1-800-600-HOPE` -> `1800600`). That fragment is then judged by
-    /// length like any other number, rather than guessed at.
+    /// Vanity letters are expanded here rather than later, because this is the
+    /// point where they would otherwise be discarded. `1-800-GET-HOPE` arrives
+    /// as one run and must leave as `1-800-438-4673`; dropping the letters first
+    /// would leave the dead fragment `1800`.
     ///
-    /// A letter after digits closes the run: `OREGON` following
-    /// `(800)-733-8855 ` must not merge into the next number.
+    /// A run whose digits already form a complete number stops there, so a
+    /// trailing place word is not translated into digits:
+    /// `(800)-733-8855 OREGON` is one number plus a tag, not two numbers.
     private static func splitNumberRuns(_ piece: String) -> [String] {
         var runs: [String] = []
         var current = ""
-        var sawLetterSinceDigits = false
+        var currentHasLetters = false
+
+        func flush() {
+            guard !current.isEmpty else { return }
+            runs.append(currentHasLetters ? expandVanity(current) : current)
+            current = ""
+            currentHasLetters = false
+        }
+
+        /// Digits buffered so far, ignoring a leading `+`.
+        func digitCount() -> Int { current.filter(\.isNumber).count }
+
+        func isCompleteNumber() -> Bool {
+            let d = current.filter(\.isNumber)
+            return d.count == 10 || (d.count == 11 && d.hasPrefix("1"))
+        }
 
         for ch in piece {
             if ch.isNumber {
                 current.append(ch)
-                sawLetterSinceDigits = false
             } else if ch == "+" && current.isEmpty {
                 current.append(ch)
             } else if ch.isLetter {
-                // Only meaningful once digits are buffered; a leading word like
-                // "Bilingual" is ignored entirely.
-                if !current.isEmpty { sawLetterSinceDigits = true }
+                // Once the digits already form a complete number, letters are a
+                // place tag (`OREGON`) and close the run. Otherwise they are
+                // vanity material and stay attached.
+                if current.isEmpty || isCompleteNumber() {
+                    flush()
+                } else {
+                    currentHasLetters = true
+                    current.append(ch)
+                }
+            } else if ch.isWhitespace {
+                // Whitespace closes any run that already has letters. Without
+                // this, two numbers separated only by a space merge into one
+                // wrong number: verified "1-855-LIGNENA 1-855-544-6362", where
+                // holding the run open produced 18551855544 instead of two
+                // numbers.
+                if currentHasLetters { flush() }
             } else {
-                // Punctuation and whitespace do not break a run by themselves,
-                // but they do close a run that letters have already ended.
-                if sawLetterSinceDigits, !current.isEmpty {
-                    runs.append(current)
-                    current = ""
-                    sawLetterSinceDigits = false
+                // Other punctuation does not break a run, but it does close one
+                // that already holds a complete number, so the next number in
+                // the field starts fresh.
+                if isCompleteNumber(), digitCount() >= 10 {
+                    flush()
                 }
             }
         }
-        if !current.isEmpty { runs.append(current) }
+        flush()
         return runs
     }
 
@@ -174,17 +202,17 @@ nonisolated struct Helpline: Equatable, Hashable {
         let trimmed = piece.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
-        // A field that is purely a vanity word ("HOPE") has no number in it.
-        // `1-800-600-HOPE` does: keep the digits, drop the letters, and let the
-        // resulting length decide reachability. There is no way to recover the
-        // letters-to-digits mapping reliably (`HOPE` is 4673 on one exchange and
-        // 600-4673 versus 800-467-3000 are both plausible), so the number is
-        // reported as-is rather than guessed at.
-        let hasInternationalPlus = trimmed.hasPrefix("+")
+        // Vanity letters were expanded during run-splitting, so this is digits
+        // and punctuation by now. `expandVanity` is still called defensively —
+        // it is idempotent and returns the input unchanged when no letters
+        // remain — because `parseOne` is also reachable directly from tests.
+        let expanded = Self.expandVanity(trimmed)
+
+        let hasInternationalPlus = expanded.hasPrefix("+")
         // Keep a leading '+' as the one non-digit that carries meaning: it is
         // what makes a number dialable across borders. Everything else that is
         // not a digit is punctuation and is dropped.
-        var digits = trimmed.filter(\.isNumber)
+        var digits = expanded.filter(\.isNumber)
         if hasInternationalPlus { digits = "+" + digits }
 
         // `00` is the international access prefix in most of the world outside
@@ -217,12 +245,22 @@ nonisolated struct Helpline: Equatable, Hashable {
         // Shortcodes: `988`, `911`, `1300`-style local-rate lines are short or
         // begin with a domestic prefix. These are never internationally
         // dialable, and US formatting must not touch them.
-        //
-        // A 4-digit run is almost always a vanity-code stub (the `1855` left
-        // over from `1-855-LIGNENA`), not a real shortcode. Drop it rather than
-        // offering the user a number that cannot connect.
-        if bareDigits.count == 4 { return nil }
-        if bareDigits.count < 7 || Self.isLocalRatePrefix(bareDigits) {
+        if bareDigits.count <= 6 {
+            // A 4-digit fragment is only a shortcode if it is a known one;
+            // otherwise it is the stub left by a vanity code that could not be
+            // expanded (see `expandVanity`). Do not offer a dead line.
+            if bareDigits.count == 4, !Self.knownShortcodes.contains(bareDigits) {
+                return nil
+            }
+            return Helpline(
+                raw: trimmed,
+                dialString: bareDigits,
+                display: bareDigits,
+                reachability: .domesticOnly
+            )
+        }
+
+        if Self.isLocalRatePrefix(bareDigits) {
             return Helpline(
                 raw: trimmed,
                 dialString: bareDigits,
@@ -297,6 +335,69 @@ nonisolated struct Helpline: Equatable, Hashable {
         "597", // Suriname
         "598", // Uruguay
     ]
+
+    /// Standard keypad letter-to-digit mapping (ITU E.161).
+    private static let keypad: [Character: Character] = [
+        "A": "2", "B": "2", "C": "2",
+        "D": "3", "E": "3", "F": "3",
+        "G": "4", "H": "4", "I": "4",
+        "J": "5", "K": "5", "L": "5",
+        "M": "6", "N": "6", "O": "6",
+        "P": "7", "Q": "7", "R": "7", "S": "7",
+        "T": "8", "U": "8", "V": "8",
+        "W": "9", "X": "9", "Y": "9", "Z": "9",
+    ]
+
+    /// Real shortcodes that are dialable as-is. Kept explicit because a short
+    /// digit run is otherwise indistinguishable from the stub left by a failed
+    /// vanity expansion.
+    ///
+    /// 3-digit codes are unambiguous (no vanity stub is 3 digits), so the 4+
+    /// digit members are the ones that matter here. `911` and `988` are the two
+    /// that carry crisis significance.
+    private static let knownShortcodes: Set<String> = [
+        "211", "311", "411", "511", "611", "711", "811",
+        "911", "988", "112", "999", "000",
+    ]
+
+    /// Expand a vanity number into digits using the keypad mapping.
+    ///
+    /// `1-800-GET-HOPE` -> `1-800-438-4673`. Only letters that are part of a
+    /// number are translated; a word that merely accompanies a number
+    /// (`OREGON`, `Bilingual`) is left alone, because translating it would
+    /// invent digits. The distinction used here: a letter run is expansion
+    /// material only when it sits inside the number's digit groups, which in
+    /// practice means the piece is dominated by a `1-8XX` prefix.
+    ///
+    /// Returns the input unchanged when it contains no vanity letters.
+    private static func expandVanity(_ text: String) -> String {
+        guard text.contains(where: \.isLetter) else { return text }
+
+        // Only a NANP toll-free / standard form is expanded. This is the shape
+        // every vanity number in the live data uses.
+        let digitsOnly = text.filter(\.isNumber)
+        guard digitsOnly.count <= 11 else { return text }
+
+        // A trailing plain word is a place tag, not part of the number:
+        // "(800)-733-8855 OREGON". Detect it by checking whether the digits
+        // already form a complete number without any letters.
+        if digitsOnly.count == 10 || (digitsOnly.count == 11 && digitsOnly.hasPrefix("1")) {
+            // Complete number already present. Any letters are decoration.
+            return digitsOnly
+        }
+
+        var out = ""
+        for ch in text {
+            if let mapped = keypad[Character(ch.uppercased())] {
+                out.append(mapped)
+            } else if ch.isNumber {
+                out.append(ch)
+            } else if ch == "+" && out.isEmpty {
+                out.append(ch)
+            }
+        }
+        return out
+    }
 
     /// Local-rate / domestic-only prefixes that must never be US-formatted.
     ///

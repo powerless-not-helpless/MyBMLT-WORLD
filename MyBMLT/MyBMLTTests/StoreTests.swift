@@ -1002,6 +1002,24 @@ struct HelplineTests {
         #expect(h.dialString == "988")
     }
 
+    @Test("911 is kept as a dialable shortcode")
+    func shortcode911() throws {
+        let h = try #require(parse("911").first)
+        #expect(h.dialString == "911")
+        #expect(h.reachability == .domesticOnly)
+        // Must not be dressed up as a phone number.
+        #expect(h.display == "911")
+    }
+
+    @Test("An unknown 4-digit stub is dropped, a known shortcode is not")
+    func fourDigitDisambiguation() {
+        // 1855 is the stub left by a vanity code that did not expand; it is not
+        // a dialable shortcode, so it must not be offered.
+        #expect(parse("1855").isEmpty)
+        // 311 is a real municipal shortcode and survives.
+        #expect(parse("311").first?.dialString == "311")
+    }
+
     @Test("Multiple numbers in one field are split, not concatenated")
     func splitMultipleNumbers() throws {
         // Northeast Washington Area, verbatim: three numbers in one field.
@@ -1027,16 +1045,6 @@ struct HelplineTests {
         #expect(got.map(\.dialString) == ["8007338855", "5308427502"])
     }
 
-    @Test("A vanity stub run is dropped, the real number kept")
-    func vanityStubDropped() throws {
-        // Verified live: "1-855-LIGNENA 1-855-544-6362". The first half is a
-        // vanity stub whose letters cannot be mapped back reliably; it yields
-        // the 4-digit fragment 1855. Only the dialable number survives.
-        let got = parse("1-855-LIGNENA 1-855-544-6362")
-        #expect(!got.contains { $0.dialString == "1855" })
-        #expect(got.contains { $0.dialString == "+18555446362" })
-    }
-
     @Test("A slash with surrounding words still splits")
     func slashWithWords() throws {
         // Verified live: "(888) 322-6817 / Bilingual (818) 427-4212".
@@ -1044,20 +1052,54 @@ struct HelplineTests {
         #expect(got.map(\.dialString) == ["8883226817", "8184274212"])
     }
 
-    @Test("Vanity numbers keep their digits rather than being mangled")
+    @Test("Vanity numbers expand to their real digits")
     func vanityNumber() throws {
-        // "1-844-530-HOPE" -> digits only. Not guessed at: the letters-to-digits
-        // mapping is ambiguous, so the raw digits are reported.
+        // 1-844-530-HOPE -> 1-844-530-4673. The keypad mapping is a fixed
+        // table, so HOPE is 4673 exactly, not a guess. An 11-digit `1...`
+        // number is normalized to E.164 with an explicit +1.
         let h = try #require(parse("1-844-530-HOPE").first)
-        #expect(h.dialString == "1844530")
-        #expect(h.reachability == .domesticOnly)
+        #expect(h.dialString == "+18445304673")
+        #expect(h.reachability == .international(countryCode: "1"))
     }
 
-    @Test("A vanity code that yields only a fragment is dropped")
-    func vanityFragmentDropped() {
-        // "1-800-GET-HOPE" leaves the 4-digit stub 1800, which is not a number
-        // anyone can dial. Better to show nothing than a dead line.
-        #expect(parse("1-800-GET-HOPE").isEmpty)
+    @Test("A vanity number with letters replacing the exchange expands")
+    func vanityWithLetteredExchange() throws {
+        // Buckeye Region: "1-800-GET-HOPE". GET = 438, HOPE = 4673, so the
+        // complete number is 1-800-438-4673. Previously this yielded only the
+        // dead fragment 1800.
+        let h = try #require(parse("1-800-GET-HOPE").first)
+        #expect(h.dialString == "+18004384673")
+    }
+
+    @Test("Mixed letters and digits inside the number expand")
+    func vanityMixed() throws {
+        // Sacramento Fellowship: "877-NA3-6363". NA = 62, giving a 10-digit
+        // NANP number.
+        let h = try #require(parse("877-NA3-6363").first)
+        #expect(h.dialString == "8776236363")
+        #expect(h.reachability == .nanp)
+    }
+
+    @Test("A vanity number agreeing with its neighbour proves the mapping")
+    func vanityCrossCheck() throws {
+        // Région de Québec [CSRQ]: "1-855-LIGNENA 1-855-544-6362".
+        // LIGNENA -> 5446362, which is exactly the number spelled out beside
+        // it. That agreement is the evidence the expansion is correct, not
+        // merely plausible.
+        let got = parse("1-855-LIGNENA 1-855-544-6362")
+        #expect(got.contains { $0.dialString == "+18555446362" })
+        // Both halves expand to the same dialable number, and no dead 1855 stub
+        // is offered.
+        #expect(got.allSatisfy { $0.dialString == "+18555446362" })
+    }
+
+    @Test("A word beside a number is not translated into digits")
+    func placeholderWordNotExpanded() throws {
+        // Southern Oregon Area: "(800)-733-8855 OREGON". The digits already
+        // form a complete number; OREGON is a place tag, and expanding it would
+        // invent a number that does not exist.
+        let got = parse("(800)-733-8855 OREGON or (530) 842-7502 CALIFORNIA")
+        #expect(got.map(\.dialString) == ["8007338855", "5308427502"])
     }
 
     @Test("Trailing junk does not corrupt the number")
