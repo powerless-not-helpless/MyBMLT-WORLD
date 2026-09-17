@@ -1,0 +1,69 @@
+# macOS
+.DS_Store
+
+# Xcode — build products
+build/
+DerivedData/
+*.ipa
+*.dSYM.zip
+*.dSYM
+*.moved-aside
+*.hmap
+*.xccheckout
+*.xcscmblueprint
+
+# Xcode — per-user state (never shared; causes constant merge conflicts)
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+project.xcworkspace/xcuserdata/
+project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/
+Package.resolved
+
+# CocoaPods / Carthage (not currently used; ignore defensively)
+Pods/
+Cartfile.resolved
+Carthage/Build/
+
+# Fastlane
+fastlane/report.xml
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Instruments
+*.trace
+
+# Profiles / signing — never commit (contains certificates and team IDs)
+*.mobileprovision
+*.p12
+*.cer
+*.certSigningRequest
+
+# Injected secrets
+Secrets.plist
+*.xcconfig.local
+
+# Editor / tooling
+.idea/
+.vscode/
+*.swp
+*~
+
+# Agent tooling — local skill caches
+.agents/
+skills-lock.json
+
+# Working notes — not part of the shippable repo
+AGGREGATOR_FINDINGS.md
+STATUS.md
+MIGRATION_NOTES.md
+format_map.txt
