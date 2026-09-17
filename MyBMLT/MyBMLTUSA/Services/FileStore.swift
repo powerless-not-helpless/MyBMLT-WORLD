@@ -85,8 +85,6 @@ nonisolated struct FileStore {
 /// Cache freshness policy, kept in one place so TTLs are arguable rather than
 /// scattered through call sites.
 enum CachePolicy {
-    /// Radius results shift as meetings start and end.
-    static let geo: TimeInterval = 5 * 60
     /// The service body graph changes very rarely.
     static let serviceBodies: TimeInterval = 7 * 24 * 60 * 60
     /// Meeting lists are stale-while-revalidate, so age never blocks display.
