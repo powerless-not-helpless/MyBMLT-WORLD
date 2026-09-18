@@ -91,6 +91,28 @@ final class AreaStore {
         }
     }
 
+    // MARK: - Nearby meetings
+
+    /// Meetings within `radiusMiles` of a coordinate, as the server reports
+    /// them.
+    ///
+    /// Exists so the Area picker's two discovery paths ("use my location" and
+    /// a city/ZIP lookup) go through this store's injected client instead of
+    /// constructing one. That is what makes the request path testable: a test
+    /// can build an `AreaStore` with a stubbed `URLSession` and observe the
+    /// real URL that was built and the rows that were decoded, neither of which
+    /// is reachable through a private method on a view.
+    ///
+    /// The radius stays a parameter with no product meaning here: callers pass
+    /// the value their flow documents.
+    func meetingsNear(latitude: Double,
+                      longitude: Double,
+                      radiusMiles: Double) async throws -> [Meeting] {
+        try await client.meetings(
+            .geo(latitude: latitude, longitude: longitude, radiusMiles: radiusMiles)
+        )
+    }
+
     // MARK: - Persistence
 
     private func persist() {

@@ -308,14 +308,13 @@ struct AreaPickerView: View {
         }
 
         do {
-            let client = AggregatorClient()
-            let nearby = try await client.meetings(
-                .geo(latitude: fix.coordinate.latitude,
-                     longitude: fix.coordinate.longitude,
-                     radiusMiles: 25)
+            let nearby = try await areas.meetingsNear(
+                latitude: fix.coordinate.latitude,
+                longitude: fix.coordinate.longitude,
+                radiusMiles: 25
             )
 
-            guard let resolved = mostFrequentOwner(of: nearby) else {
+            guard let resolved = AreaProximity.nearestOwner(of: nearby, in: areas.tree) else {
                 suggestionNote = "Found meetings nearby, but couldn't match them to an Area. Search instead."
                 return
             }
@@ -325,81 +324,6 @@ struct AreaPickerView: View {
         } catch {
             suggestionNote = "Couldn't search nearby: \(error.localizedDescription)"
         }
-    }
-
-    /// Resolves a block of meetings to the Area that owns most of them.
-    ///
-    /// Meetings carry a service body id, so the most frequent owner of nearby
-    /// meetings is the Area covering that point. Shared by the location path and
-    /// the city-name path.
-    private func mostFrequentOwner(of meetings: [Meeting]) -> ServiceBody? {
-        guard areas.tree != nil, !meetings.isEmpty else { return nil }
-        return rankOwners(of: meetings).first
-    }
-
-    /// How many of the nearest meetings vote on the owning Area.
-    ///
-    /// Five is enough to be stable (a single mis-geocoded row cannot flip a
-    /// 5-0 or 3-2 vote) and small enough to stay local, so an Area 20 miles away
-    /// cannot outvote one whose meetings are next door.
-    private static let nearestSampleSize = 5
-
-    /// Areas that own meetings near a point, best first.
-    ///
-    /// **Proximity is the signal.** The Area covering a place is the one whose
-    /// meetings are nearest to it — a geographic fact. Earlier revisions ranked
-    /// by *how many* meetings an Area owned within 25 miles, a popularity
-    /// contest that metro boundaries corrupt. Measured:
-    ///
-    /// | City | count-based (old) | nearest-meeting (now) |
-    /// |---|---|---|
-    /// | Tampa, FL | Bay Area (117 meetings) | Tampa Funcoast Area (0.0 mi) |
-    /// | Youngstown, OH | 14-14 tie | NE Ohio Area (1.0 mi) |
-    /// | Rochester, MI | 52-52 tie | Oakland County Area (0.9 mi) |
-    ///
-    /// The radius stopped mattering too: only the nearest few rows are consulted,
-    /// so 25 or 250 miles gives the same answer.
-    ///
-    /// A name/description match used to override this — an Area whose name said
-    /// "Tampa" beat one owning more nearby meetings. It was measured across ten
-    /// cities and **never changed an outcome**: with it on or off, every city
-    /// resolved identically, because the nearest-five vote is never tied. It was
-    /// removed rather than kept as decoration.
-    private func rankOwners(of meetings: [Meeting]) -> [ServiceBody] {
-        guard let tree = areas.tree, !meetings.isEmpty else { return [] }
-
-        // Meetings arrive from a `geo_width` query already carrying the
-        // server's distance. Anything without one cannot be placed, so it votes
-        // last rather than not at all.
-        let placed = meetings
-            .filter { $0.distanceMiles != nil }
-            .sorted { ($0.distanceMiles ?? .greatestFiniteMagnitude)
-                    < ($1.distanceMiles ?? .greatestFiniteMagnitude) }
-
-        let sample = placed.isEmpty
-            ? Array(meetings.prefix(Self.nearestSampleSize))
-            : Array(placed.prefix(Self.nearestSampleSize))
-
-        var votes: [Int: Int] = [:]
-        var nearest: [Int: Double] = [:]
-        for meeting in sample {
-            votes[meeting.serviceBodyID, default: 0] += 1
-            let d = meeting.distanceMiles ?? .greatestFiniteMagnitude
-            nearest[meeting.serviceBodyID] = min(nearest[meeting.serviceBodyID] ?? d, d)
-        }
-
-        return votes
-            .sorted { a, b in
-                if a.value != b.value { return a.value > b.value }
-                // Ties are not observed in practice, but the order must still be
-                // deterministic: `Dictionary` iteration order is unspecified and
-                // `sorted` is not stable.
-                let ad = nearest[a.key] ?? .greatestFiniteMagnitude
-                let bd = nearest[b.key] ?? .greatestFiniteMagnitude
-                if ad != bd { return ad < bd }
-                return a.key < b.key
-            }
-            .compactMap { id, _ in tree.bodies.first { $0.id == id } }
     }
 
     // MARK: - City lookup
@@ -450,11 +374,10 @@ struct AreaPickerView: View {
                     return
                 }
 
-                let client = AggregatorClient()
-                let nearby = try await client.meetings(
-                    .geo(latitude: location.latitude,
-                         longitude: location.longitude,
-                         radiusMiles: 25)
+                let nearby = try await areas.meetingsNear(
+                    latitude: location.latitude,
+                    longitude: location.longitude,
+                    radiusMiles: 25
                 )
 
                 // Never mention the radius. 25 miles is an implementation
@@ -471,9 +394,9 @@ struct AreaPickerView: View {
                 }
 
                 // Proximity decides which Area covers this point — see
-                // `rankOwners`. No text matching is involved: it was measured
+                // `AreaProximity`. No text matching is involved: it was measured
                 // and never changed a result.
-                let ranked = rankOwners(of: nearby)
+                let ranked = AreaProximity.owners(of: nearby, in: areas.tree)
 
                 guard let best = ranked.first else {
                     geocodeNote = "Found meetings for “\(text)” but couldn't match them to an area. Try the region name instead."
@@ -503,5 +426,111 @@ struct AreaPickerView: View {
                 }
             }
         }
+    }
+}
+
+/// Resolves a coordinate to the Area that owns it, from the meetings the server
+/// reports nearby.
+///
+/// A pure function of the meeting list and the service body graph, so it is
+/// testable without a window, an environment, or a network. It used to be two
+/// private methods on `AreaPickerView` reading `areas.tree` from the
+/// environment, which left the one decision that picks the user's Area
+/// unreachable from tests.
+///
+/// `nonisolated`: no UI state, and it must stay callable from the nonisolated
+/// `Task` bodies that fetch the meetings it ranks.
+nonisolated enum AreaProximity {
+
+    /// How many of the nearest meetings vote on the owning Area.
+    ///
+    /// Five is enough to be stable (a single mis-geocoded row cannot flip a
+    /// 5-0 or 3-2 vote) and small enough to stay local, so an Area 20 miles away
+    /// cannot outvote one whose meetings are next door.
+    static let nearestSampleSize = 5
+
+    /// The Area owning the nearest meetings, or nil when none can be placed.
+    ///
+    /// Shared by the location path and the city-name path.
+    static func nearestOwner(of meetings: [Meeting], in tree: ServiceBodyTree?) -> ServiceBody? {
+        owners(of: meetings, in: tree).first
+    }
+
+    /// Areas that own meetings near a point, best first.
+    ///
+    /// **The vote is a plurality inside the nearest few meetings.** Meetings are
+    /// ordered by the server's own distance, truncated to `nearestSampleSize`,
+    /// and the Area owning the most of those wins. Bounding the window first is
+    /// what makes this geographic rather than a popularity contest: an Area with
+    /// hundreds of meetings 20 miles away contributes nothing, because its rows
+    /// never reach the window.
+    ///
+    /// Earlier revisions counted owners across every meeting within 25 miles,
+    /// which metro boundaries corrupt. Measured:
+    ///
+    /// | City | count-based (old) | now |
+    /// |---|---|---|
+    /// | Tampa, FL | Bay Area (117 meetings) | Tampa Funcoast Area (0.0 mi) |
+    /// | Youngstown, OH | 14-14 tie | NE Ohio Area (1.0 mi) |
+    /// | Rochester, MI | 52-52 tie | Oakland County Area (0.9 mi) |
+    ///
+    /// The radius stopped mattering too: only the nearest few rows are consulted,
+    /// so 25 or 250 miles gives the same answer.
+    ///
+    /// Note the ranking is **not** "the owner of the single nearest meeting":
+    /// within the window it is still a count. The two differ when the nearest
+    /// Area has fewer rows in the window than a slightly-further one, and the
+    /// window is what keeps the difference local. `AreaProximityTests` pins the
+    /// real behaviour.
+    ///
+    /// A name/description match used to override this — an Area whose name said
+    /// "Tampa" beat one owning more nearby meetings. It was measured across ten
+    /// cities and **never changed an outcome**: with it on or off, every city
+    /// resolved identically, because the nearest-five vote is never tied. It was
+    /// removed rather than kept as decoration.
+    static func owners(of meetings: [Meeting], in tree: ServiceBodyTree?) -> [ServiceBody] {
+        guard let tree, !meetings.isEmpty else { return [] }
+
+        // Meetings arrive from a `geo_width` query already carrying the
+        // server's distance, so the nearest few can be selected directly.
+        //
+        // Rows without a distance are **excluded entirely** once any row has
+        // one -- they do not "vote last". They only participate in the
+        // all-distance-absent fallback, where the server's own order is used and
+        // distance cannot discriminate. An earlier comment here claimed they
+        // vote last rather than not at all; that was wrong for the mixed case,
+        // and `unplacedRowsAreExcludedWhenOthersArePlaced` pins the real
+        // behaviour.
+        let placed = meetings
+            .filter { $0.distanceMiles != nil }
+            .sorted { ($0.distanceMiles ?? .greatestFiniteMagnitude)
+                    < ($1.distanceMiles ?? .greatestFiniteMagnitude) }
+
+        let sample = placed.isEmpty
+            ? Array(meetings.prefix(nearestSampleSize))
+            : Array(placed.prefix(nearestSampleSize))
+
+        var votes: [Int: Int] = [:]
+        var nearest: [Int: Double] = [:]
+        for meeting in sample {
+            votes[meeting.serviceBodyID, default: 0] += 1
+            let d = meeting.distanceMiles ?? .greatestFiniteMagnitude
+            nearest[meeting.serviceBodyID] = min(nearest[meeting.serviceBodyID] ?? d, d)
+        }
+
+        return votes
+            .sorted { a, b in
+                if a.value != b.value { return a.value > b.value }
+                // Ties are not observed in practice, but the order must still be
+                // deterministic: `Dictionary` iteration order is unspecified and
+                // `sorted` is not stable.
+                let ad = nearest[a.key] ?? .greatestFiniteMagnitude
+                let bd = nearest[b.key] ?? .greatestFiniteMagnitude
+                if ad != bd { return ad < bd }
+                return a.key < b.key
+            }
+            // An owner id absent from the graph is dropped rather than
+            // rendered: it cannot be selected as an Area.
+            .compactMap { id, _ in tree.bodies.first { $0.id == id } }
     }
 }
