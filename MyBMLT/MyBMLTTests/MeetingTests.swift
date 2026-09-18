@@ -502,7 +502,7 @@ struct MeetingTextExportTests {
             virtualInfo: "Zoom ID: 215 310 190, Passcode: 1953",
             formats: ["SD", "VM"]
         )
-        let text = MeetingTextExport.plainText(for: m)
+        let text = MeetingTextExport.plainText(for: m, serverLabels: [:])
 
         #expect(text.contains("Mon at 7:00 PM"))
         #expect(text.contains("Sonoma Online Meeting"))
@@ -523,7 +523,7 @@ struct MeetingTextExportTests {
             virtualLink: "https://zoom.us/j/215310190",
             formats: ["VM"]
         )
-        let text = MeetingTextExport.plainText(for: m)
+        let text = MeetingTextExport.plainText(for: m, serverLabels: [:])
 
         // day/time, name, duration, link, formats = 5 lines. No password line:
         // this fixture supplies no virtualInfo or locationInfo.
@@ -537,13 +537,13 @@ struct MeetingTextExportTests {
     func durationIsExported() {
         // The fixture runs 01:30:00.
         let m = meeting(venueType: 1, formats: ["O"])
-        #expect(MeetingTextExport.plainText(for: m).contains("1 hr 30 min"))
+        #expect(MeetingTextExport.plainText(for: m, serverLabels: [:]).contains("1 hr 30 min"))
     }
 
     @Test("An in-person meeting exports its address and omits join details")
     func inPersonExport() {
         let m = meeting(venueType: 1, formats: ["O", "D"])
-        let text = MeetingTextExport.plainText(for: m)
+        let text = MeetingTextExport.plainText(for: m, serverLabels: [:])
 
         #expect(text.contains("464 Palm Ave, Penngrove, 94951"))
         #expect(!text.contains("Join"))
@@ -559,20 +559,20 @@ struct MeetingTextExportTests {
         // Verified real case: some phone/online meetings carry the password in
         // location_info and nowhere else.
         let m = meeting(venueType: 2, locationInfo: "Zoom: 916 338 0135 Pwd: 12345")
-        #expect(MeetingTextExport.plainText(for: m).contains("Password: 12345"))
+        #expect(MeetingTextExport.plainText(for: m, serverLabels: [:]).contains("Password: 12345"))
     }
 
     @Test("Unknown format codes survive as codes rather than vanishing")
     func unknownFormatCode() {
         let m = meeting(venueType: 1, formats: ["ZZZ"])
-        #expect(MeetingTextExport.plainText(for: m).contains("ZZZ"))
+        #expect(MeetingTextExport.plainText(for: m, serverLabels: [:]).contains("ZZZ"))
     }
 
     @Test("Copying several meetings separates them by a blank line")
     func multipleMeetings() {
         let a = meeting(venueType: 1)
         let b = meeting(venueType: 1)
-        let parts = MeetingTextExport.plainText(for: [a, b])
+        let parts = MeetingTextExport.plainText(for: [a, b], serverLabels: [:])
             .components(separatedBy: "\n\n")
         #expect(parts.count == 2)
     }

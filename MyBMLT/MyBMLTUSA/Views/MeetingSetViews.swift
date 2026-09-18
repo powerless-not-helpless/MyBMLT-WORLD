@@ -117,7 +117,8 @@ struct MeetingSetTabView: View {
         if allowsCopyAll && !store.all.isEmpty {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
-                    UIPasteboard.general.string = MeetingTextExport.plainText(for: store.all)
+                    UIPasteboard.general.string = MeetingTextExport.plainText(
+                        for: store.all, serverLabels: meetings.formatLabels)
                     copied = true
                     Task {
                         try? await Task.sleep(for: .seconds(2))
@@ -206,11 +207,14 @@ nonisolated enum MeetingTextExport {
 
     /// Human-readable format names for a meeting's format codes.
     ///
-    /// Falls back to the raw code when no label is known, matching
-    /// `MeetingDetailView`. Labels are per-root-server, so `BundledFormats`
-    /// (SDICR) is only a default and the code is shown verbatim on a miss.
-    static func formatNames(for meeting: Meeting) -> [String] {
-        meeting.formats.map { BundledFormats.labels[$0] ?? $0 }
+    /// `serverLabels` is `MeetingStore.formatLabels` — the live map for the
+    /// active root server. It is passed in rather than read from the
+    /// environment so this stays a pure function, and it is required rather than
+    /// defaulted so a caller cannot silently fall back to the bundled SDICR
+    /// table, which is only correct inside that region. See `FormatLabels` for
+    /// the resolution order.
+    static func formatNames(for meeting: Meeting, serverLabels: [String: String]) -> [String] {
+        FormatLabels.resolve(meeting.formats, server: serverLabels)
     }
 
     /// The copyable text for one meeting.
@@ -219,7 +223,7 @@ nonisolated enum MeetingTextExport {
     /// time zone and service body, which made a message-length paste where the
     /// recipient needed six facts. What survives is what someone actually needs
     /// to attend: when, where, how to get in, and what kind of meeting it is.
-    static func plainText(for meeting: Meeting) -> String {
+    static func plainText(for meeting: Meeting, serverLabels: [String: String]) -> String {
         var lines: [String] = []
 
         lines.append("\(meeting.weekdayName) at \(meeting.formattedTime)")
@@ -239,7 +243,7 @@ nonisolated enum MeetingTextExport {
             if let password = meeting.passwordValue { lines.append("Password: \(password)") }
         }
 
-        let names = formatNames(for: meeting)
+        let names = formatNames(for: meeting, serverLabels: serverLabels)
         if !names.isEmpty {
             lines.append(names.joined(separator: ", "))
         }
@@ -247,7 +251,8 @@ nonisolated enum MeetingTextExport {
         return lines.joined(separator: "\n")
     }
 
-    static func plainText(for meetings: [Meeting]) -> String {
-        meetings.map(plainText(for:)).joined(separator: "\n\n")
+    static func plainText(for meetings: [Meeting], serverLabels: [String: String]) -> String {
+        meetings.map { plainText(for: $0, serverLabels: serverLabels) }
+            .joined(separator: "\n\n")
     }
 }

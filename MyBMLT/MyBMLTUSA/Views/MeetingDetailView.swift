@@ -25,10 +25,21 @@ struct MeetingDetailView: View {
     let meeting: Meeting
 
     @Environment(UserLists.self) private var lists: UserLists?
+    /// Optional for the same reason as `lists`: a non-optional `@Observable`
+    /// environment lookup traps when the value is absent, which would make this
+    /// view unrenderable in a preview. Absent, format labels fall back to the
+    /// bundled table — see `formatLabels`.
+    @Environment(MeetingStore.self) private var meetings: MeetingStore?
     @Environment(\.openURL) private var openURL
 
     @State private var copied = false
     @State private var showingFormatCodes = false
+
+    /// Live format labels for the active root server, or empty when no store is
+    /// in the environment (a preview or a bare test host). Empty is a safe
+    /// degradation: `FormatLabels` then falls through to the bundled table and
+    /// finally to the raw code.
+    private var formatLabels: [String: String] { meetings?.formatLabels ?? [:] }
 
     var body: some View {
         ScrollView {
@@ -348,7 +359,7 @@ struct MeetingDetailView: View {
             }
 
             FlowLayout(items: meeting.formats.map { code in
-                showingFormatCodes ? code : (BundledFormats.labels[code] ?? code)
+                showingFormatCodes ? code : FormatLabels.resolve(code, server: formatLabels)
             })
         }
     }
@@ -356,7 +367,8 @@ struct MeetingDetailView: View {
     private var exportBlock: some View {
         VStack(alignment: .leading, spacing: 8) {
             Button {
-                UIPasteboard.general.string = MeetingTextExport.plainText(for: [meeting])
+                UIPasteboard.general.string = MeetingTextExport.plainText(
+                    for: [meeting], serverLabels: formatLabels)
                 copied = true
                 Task {
                     try? await Task.sleep(for: .seconds(2))

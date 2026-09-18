@@ -177,6 +177,37 @@ nonisolated enum BundledFormats {
         "SD": "Speaker Discussion", "SG": "Step Working Guide", "So": "Speaker Only",
         "SPAD": "Spiritual Principle a Day", "St": "Step Study", "TC": "Temporarily Closed Facility",
         "To": "Topic", "Tr": "Tradition", "VM": "Virtual Meeting", "W": "Women",
-        "WC": "Wheelchair", "YP": "Young People", "§": "Stamp",
+        "WC": "Wheelchair", "YP": "Young People", "§": "Court Slips Signed",
     ]
+}
+
+/// Turns meeting format codes into human-readable names.
+///
+/// **Resolution order: server labels, then bundled labels, then the raw code.**
+///
+/// Formats are per-root-server, so the server's own map is the only correct
+/// primary source: `O` means "Open" on most servers but "Meets 2nd wk of month"
+/// on root 10. `BundledFormats` describes SDICR (root 38) alone, so treating it
+/// as the primary source mislabels every meeting outside that region in two
+/// ways — a code the server knows but the table does not renders as a bare code,
+/// and a code whose meaning differs renders SDICR's meaning, which is
+/// *confidently* wrong rather than visibly missing.
+///
+/// The bundled table is kept as the second layer because it still helps before
+/// the first fetch lands, or on an offline first launch, when the server map is
+/// empty. Only a code in neither map is shown verbatim.
+///
+/// `nonisolated`: pure lookups over value types, reachable from the nonisolated
+/// `MeetingTextExport` as well as from views.
+nonisolated enum FormatLabels {
+
+    /// Resolve one code. A non-empty code always yields a non-empty name.
+    static func resolve(_ code: String, server: [String: String]) -> String {
+        server[code] ?? BundledFormats.labels[code] ?? code
+    }
+
+    /// Resolve a meeting's codes, preserving the order they arrived in.
+    static func resolve(_ codes: [String], server: [String: String]) -> [String] {
+        codes.map { resolve($0, server: server) }
+    }
 }

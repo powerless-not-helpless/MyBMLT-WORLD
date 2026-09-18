@@ -15,6 +15,10 @@ struct MeetingCard: View {
     var isInProgress: Bool = false
 
     @Environment(UserLists.self) private var lists: UserLists?
+    /// Optional so the card still renders in a preview or bare test host, the
+    /// same reasoning as `lists`. Absent, exported format names fall back to the
+    /// bundled table rather than to the wrong root server's meaning.
+    @Environment(MeetingStore.self) private var meetings: MeetingStore?
 
     /// Brief confirmation that the copy landed. Reset by a timed task.
     @State private var didCopy = false
@@ -192,7 +196,8 @@ struct MeetingCard: View {
 
             // 3. Copy the meeting's details, including join credentials.
             Button {
-                UIPasteboard.general.string = MeetingTextExport.plainText(for: meeting)
+                UIPasteboard.general.string = MeetingTextExport.plainText(
+                    for: meeting, serverLabels: meetings?.formatLabels ?? [:])
                 didCopy = true
                 Task {
                     try? await Task.sleep(for: .seconds(2))

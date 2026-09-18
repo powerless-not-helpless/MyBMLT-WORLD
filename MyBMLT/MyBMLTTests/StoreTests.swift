@@ -1142,3 +1142,88 @@ struct HelplineTests {
         #expect(au.helplineDigits == "+61488811247")
     }
 }
+
+/// Format-code label resolution.
+///
+/// Formats are per-root-server: the aggregator returns 1,502 format rows with
+/// only 309 unique keys, and `O` means "Open" on most servers but "Meets 2nd wk
+/// of month" on root 10. The bundled table describes SDICR (root 38) alone, so
+/// using it as the primary source mislabels every meeting outside that region.
+///
+/// The resolution order under test is **server -> bundled -> raw code**.
+@Suite("Format label resolution")
+struct FormatLabelTests {
+
+    private func meeting(formats: [String]) -> Meeting {
+        Meeting(
+            id: 1, rootServerID: 38, name: "Format Test Group",
+            weekday: 2, startTime: "19:00:00", duration: "01:00:00",
+            locationName: "", street: "", city: "", zip: "", locationInfo: "",
+            virtualLink: nil, virtualInfo: nil, formats: formats,
+            serviceBodyID: 1, serviceBodyName: "", venueType: 1,
+            latitude: nil, longitude: nil, timeZoneID: "",
+            distanceMiles: nil, distanceKilometers: nil
+        )
+    }
+
+    @Test("A server label wins over the bundled label for the same code")
+    func serverLabelWins() {
+        // The verified collision: `O` is "Open" in the bundled SDICR table but
+        // carries a different meaning on root 10. Showing the bundled label here
+        // would be confidently wrong rather than visibly missing.
+        let server = ["O": "Meets 2nd wk of month"]
+        #expect(FormatLabels.resolve("O", server: server) == "Meets 2nd wk of month")
+    }
+
+    @Test("A code the server does not describe falls back to the bundled label")
+    func bundledFallback() {
+        // Empty server map is the pre-fetch and first-launch offline state.
+        #expect(FormatLabels.resolve("O", server: [:]) == "Open")
+        // A map that simply lacks this key behaves the same way.
+        #expect(FormatLabels.resolve("D", server: ["XX": "Unrelated"]) == "Discussion")
+    }
+
+    @Test("A code in neither map renders the raw code verbatim")
+    func rawCodeFallback() {
+        // Better a bare code than a label borrowed from the wrong server.
+        #expect(FormatLabels.resolve("ZZZ", server: [:]) == "ZZZ")
+        #expect(FormatLabels.resolve("MED", server: ["O": "Open"]) == "MED")
+    }
+
+    @Test("The SDICR codes that motivated the fix resolve via the bundled fallback")
+    func bundledCoversTheMotivatingCodes() {
+        // `§` (146 uses) and `JT` (114) are the two most common SDICR codes
+        // after O and D, and both were absent from an earlier 33-key table whose
+        // "verified 33/33" claim only proved the keys were spelled correctly.
+        //
+        // `§` means **court slips signed** -- a court-card confirmation the
+        // meeting signs for attendees. It is not a rubber stamp and not a
+        // generic "Stamp"; the label was corrected after review.
+        #expect(FormatLabels.resolve("§", server: [:]) == "Court Slips Signed")
+        #expect(FormatLabels.resolve("JT", server: [:]) == "Just for Today")
+    }
+
+    @Test("Resolving a list keeps the order the codes arrived in")
+    func preservesOrder() {
+        let got = FormatLabels.resolve(["JT", "ZZZ", "O"], server: ["ZZZ": "From server"])
+        #expect(got == ["Just for Today", "From server", "Open"])
+    }
+
+    @Test("The export path uses the server map, not the bundled table")
+    func exportUsesServerLabels() {
+        // Exercises the real call path rather than the resolver alone: this is
+        // the bug as a user would have hit it, via Copy Meeting Details.
+        let text = MeetingTextExport.plainText(
+            for: meeting(formats: ["O"]),
+            serverLabels: ["O": "Meets 2nd wk of month"]
+        )
+        #expect(text.contains("Meets 2nd wk of month"))
+        #expect(!text.contains("Open"))
+    }
+
+    @Test("The export path falls back to the bundled label when the server is silent")
+    func exportFallsBackToBundled() {
+        let text = MeetingTextExport.plainText(for: meeting(formats: ["O"]), serverLabels: [:])
+        #expect(text.contains("Open"))
+    }
+}
