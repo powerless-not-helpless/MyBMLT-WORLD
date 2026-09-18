@@ -67,3 +67,6 @@ AGGREGATOR_FINDINGS.md
 STATUS.md
 MIGRATION_NOTES.md
 format_map.txt
+
+# Outward-facing reports generated from the audit notes
+BMLT-Dead-Service-Body-URLs.docx
