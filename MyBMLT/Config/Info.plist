@@ -45,18 +45,5 @@
 	<!-- Location is opt-in and never gates the first screen. -->
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>MyBMLT uses your location once to suggest meetings near you. You can also search by city or ZIP without sharing your location.</string>
-
-	<!--
-	  Required so the app can detect whether Zoom or Google Maps is installed
-	  before offering that option. Without these entries canOpenURL always
-	  returns false and the Google Maps option would never appear.
-	-->
-	<key>LSApplicationQueriesSchemes</key>
-	<array>
-		<string>zoommtg</string>
-		<string>zoomus</string>
-		<string>comgooglemaps</string>
-		<string>maps</string>
-	</array>
 </dict>
 </plist>

@@ -259,66 +259,36 @@ struct VenueBadge: View {
 enum MeetingActions {
 
     /// Apple Maps is the correct and only platform choice on iOS.
-    ///
-    /// Google Maps is offered separately when the user has it installed; see
-    /// `openInGoogleMaps(_:)` for why that is detected by *attempting* the
-    /// deep link rather than by asking `canOpenURL` first.
     static func openInMaps(_ meeting: Meeting) {
-        guard let lat = meeting.latitude, let lon = meeting.longitude,
-              lat.isFinite, lon.isFinite,
-              (-90...90).contains(lat), (-180...180).contains(lon),
-              !(lat == 0 && lon == 0)
-        else { return }
-
-        let name = meeting.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let urlString = "maps://?q=\(name)&ll=\(lat),\(lon)"
-        guard let url = URL(string: urlString) else { return }
+        guard let url = mapsURL(for: meeting) else { return }
         UIApplication.shared.open(url)
     }
 
-    /// Whether the "Google Maps" button is worth showing at all.
+    /// Whether the meeting has a location worth offering on a map.
     ///
-    /// This is deliberately **not** a `canOpenURL` check. Gating the button on
-    /// `canOpenURL("comgooglemaps://")` hid it entirely from users without
-    /// Google Maps installed, and `canOpenURL` is deprecated as of iOS 27 —
-    /// Apple's guidance is to attempt the open and handle the failure.
-    ///
-    /// `openInGoogleMaps(_:)` does exactly that, so the button can be offered
-    /// unconditionally: a user with the app gets the deep link, and a user
-    /// without it gets the web map. The coordinate guard mirrors
-    /// `openInMaps(_:)` so the button is not shown for a meeting that has no
-    /// usable location.
-    static func canOpenGoogleMaps(_ meeting: Meeting) -> Bool {
-        guard let lat = meeting.latitude, let lon = meeting.longitude,
-              lat.isFinite, lon.isFinite,
-              (-90...90).contains(lat), (-180...180).contains(lon),
-              !(lat == 0 && lon == 0)
-        else { return false }
-        return true
+    /// This is the single guard behind the "Open in Maps" button: it decides
+    /// both whether the button appears and whether opening anything is
+    /// attempted. Kept as a pure function of the meeting so it can be tested
+    /// without a UI host.
+    static func canOpenInMaps(_ meeting: Meeting) -> Bool {
+        mapsURL(for: meeting) != nil
     }
 
-    /// Opens the location in Google Maps, falling back to the web map when the
-    /// app is not installed.
+    /// The Apple Maps URL for a meeting, or nil when it has no usable location.
     ///
-    /// The completion handler is what makes the fallback reliable, and mirrors
-    /// the pattern already used by `openJoinTarget(_:)` for Zoom. `open` reports
-    /// `false` when no installed app claims the URL, which is the supported way
-    /// to detect absence without the deprecated `canOpenURL` query.
-    static func openInGoogleMaps(_ meeting: Meeting) {
+    /// Rejects `0,0` ("null island"): meetings with no real location sometimes
+    /// serialize as `0.0` rather than absent, and a pin in the Gulf of Guinea is
+    /// worse than no button. Also rejects non-finite and out-of-range values.
+    private static func mapsURL(for meeting: Meeting) -> URL? {
         guard let lat = meeting.latitude, let lon = meeting.longitude,
               lat.isFinite, lon.isFinite,
               (-90...90).contains(lat), (-180...180).contains(lon),
               !(lat == 0 && lon == 0)
-        else { return }
+        else { return nil }
 
-        let appString = "comgooglemaps://?q=\(lat),\(lon)&center=\(lat),\(lon)&zoom=15"
-        let webString = "https://www.google.com/maps/search/?api=1&query=\(lat),\(lon)"
-        guard let appURL = URL(string: appString) else { return }
-
-        UIApplication.shared.open(appURL, options: [:]) { success in
-            guard !success, let webURL = URL(string: webString) else { return }
-            UIApplication.shared.open(webURL)
-        }
+        let name = meeting.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let urlString = "maps://?q=\(name)&ll=\(lat),\(lon)"
+        return URL(string: urlString)
     }
 
     /// Opens a Zoom deep link, falling back to the web URL when the app is not

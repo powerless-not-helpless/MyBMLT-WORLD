@@ -282,23 +282,12 @@ struct MeetingDetailView: View {
 
             if meeting.hasPhysicalVenue,
                meeting.latitude != nil, meeting.longitude != nil {
-                HStack {
-                    Button {
-                        MeetingActions.openInMaps(meeting)
-                    } label: {
-                        Label("Open in Maps", systemImage: "map")
-                    }
-                    .buttonStyle(.bordered)
-
-                    if MeetingActions.canOpenGoogleMaps(meeting) {
-                        Button {
-                            MeetingActions.openInGoogleMaps(meeting)
-                        } label: {
-                            Label("Google Maps", systemImage: "arrow.triangle.turn.up.right.circle")
-                        }
-                        .buttonStyle(.bordered)
-                    }
+                Button {
+                    MeetingActions.openInMaps(meeting)
+                } label: {
+                    Label("Open in Maps", systemImage: "map")
                 }
+                .buttonStyle(.bordered)
             }
         }
     }
